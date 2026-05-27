@@ -1,4 +1,4 @@
-import { html } from "lit";
+﻿import { html } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import { t } from "../../i18n/index.ts";
 import { createChatSessionsLoadOverrides } from "../app-chat.ts";
@@ -498,7 +498,7 @@ function formatChatSessionPickerMeta(row: SessionsListResult["sessions"][number]
   if (typeof row.updatedAt === "number" && Number.isFinite(row.updatedAt)) {
     parts.push(new Date(row.updatedAt).toLocaleString());
   }
-  return parts.join(" · ");
+  return parts.join(" 路 ");
 }
 
 function renderChatSessionPicker(params: {
@@ -706,11 +706,11 @@ function renderChatQuotaPill(state: AppViewState) {
   const reset = formatQuotaReset(primary.resetAt);
   const detail = [primary.displayName, primary.label, reset ? `resets ${reset}` : null]
     .filter(Boolean)
-    .join(" · ");
+    .join(" 路 ");
   const secondaryDetail = secondary
     ? `${secondary.displayName}${secondary.label ? ` ${secondary.label}` : ""} ${secondary.remaining}% left`
     : null;
-  const title = [detail, secondaryDetail].filter(Boolean).join(" · ");
+  const title = [detail, secondaryDetail].filter(Boolean).join(" 路 ");
   const severity = primary.remaining <= 10 ? "danger" : primary.remaining <= 25 ? "warn" : "ok";
 
   return html`
@@ -788,6 +788,7 @@ function renderChatModelSelect(state: AppViewState) {
   const { currentOverride, defaultLabel, options } = resolveChatModelSelectState(state);
   const busy =
     state.chatLoading || state.chatSending || Boolean(state.chatRunId) || state.chatStream !== null;
+  if (busy) (state as any).___modelPopoverOpen = false;
   const disabled =
     !state.connected ||
     busy ||
@@ -798,33 +799,154 @@ function renderChatModelSelect(state: AppViewState) {
     currentOverride === ""
       ? defaultLabel
       : (options.find((entry) => entry.value === currentOverride)?.label ?? currentOverride);
-  return html`
-    <label class="field chat-controls__session chat-controls__model">
-      <select
-        data-chat-model-select="true"
-        aria-label=${t("chat.selectors.model")}
-        title=${selectedLabel}
-        ?disabled=${disabled}
-        @change=${async (e: Event) => {
-          const next = (e.target as HTMLSelectElement).value.trim();
-          await switchChatModel(state, next);
-        }}
-      >
-        <option value="" ?selected=${currentOverride === ""}>${defaultLabel}</option>
-        ${repeat(
-          options,
-          (entry) => entry.value,
-          (entry) =>
-            html`<option value=${entry.value} ?selected=${entry.value === currentOverride}>
-              ${entry.label}
-            </option>`,
-        )}
-      </select>
-    </label>
-  `;
-}
 
-type ChatThinkingSelectOption = {
+  // Group models by family (first word before space)
+  const groups = new Map<string, typeof options>();
+  const GROUP_ORDER = ['DeepSeek','GPT','Claude','GLM','Gemini','Qwen','Kimi','MiniMax','MiMo','Doubao','Grok','ABAB','Other'];
+  for (const opt of options) {
+    const sp = opt.label.indexOf(' ');
+    let group: string;
+    if (sp <= 0) {
+      group = 'Other';
+    } else {
+      const first = opt.label.slice(0, sp);
+      group = GROUP_ORDER.includes(first) ? first : first;
+    }
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group)!.push(opt);
+  }
+  const sortedNames = GROUP_ORDER.filter(g => groups.has(g));
+  sortedNames.push(...Array.from(groups.keys()).filter(g => !GROUP_ORDER.includes(g)));
+
+  // Collapse state
+  const modelStateKey = '___modelColors' as keyof AppViewState;
+  if (!(state as any).___modelCollapsed) (state as any).___modelCollapsed = new Set<string>();
+  const collapsed = (state as any).___modelCollapsed as Set<string>;
+  const toggleGroup = (name: string) => {
+    if (collapsed.has(name)) collapsed.delete(name); else collapsed.add(name);
+    (state as any).requestUpdate?.();
+  };
+  const toggleAllGroups = () => {
+    const allCollapsed = sortedNames.every(g => collapsed.has(g));
+    for (const g of sortedNames) {
+      if (allCollapsed) collapsed.delete(g); else collapsed.add(g);
+    }
+    (state as any).requestUpdate?.();
+  };
+  // Popover open state
+  if (!(state as any).___modelPopoverOpen) (state as any).___modelPopoverOpen = false;
+  const togglePopover = () => {
+    (state as any).___modelPopoverOpen = !(state as any).___modelPopoverOpen;
+    (state as any).requestUpdate?.();
+  };
+  const closePopover = () => {
+    (state as any).___modelPopoverOpen = false;
+    (state as any).requestUpdate?.();
+  };
+
+  return html`
+    <style>
+      .model-sel { position:relative; display:inline-flex; flex:1; min-width:0; }
+      .model-sel-trigger {
+        display:flex; align-items:center; gap:6px; width:100%; flex:1;
+        min-height:36px; padding:8px 10px 8px 12px; box-sizing:border-box;
+        border:1px solid var(--input);
+        border-radius:var(--radius-md,10px); background:var(--bg-elevated);
+        cursor:pointer; font:inherit; font-size:14px; line-height:1.2; text-align:left; white-space:nowrap;
+        color:var(--text);
+      }
+      .model-sel-trigger:disabled { opacity:.5; cursor:default; }
+      .model-sel-trigger-label { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .model-sel-trigger-arrow { display:inline-flex; width:16px; height:16px; transition:transform .2s; color:var(--muted); }
+      .model-sel-trigger-arrow.open { transform:rotate(180deg); }
+      .model-sel-trigger-arrow svg { width:16px; height:16px; stroke:currentColor; fill:none; stroke-width:1.5px; }
+      .model-sel-panel {
+        position:absolute; top:100%; left:0; right:auto; z-index:100; margin-top:2px;
+        min-width:100%; max-height:360px; overflow-y:auto;
+        background:var(--color-elevated-bg,var(--color-surface-bg,#fff));
+        border:1px solid var(--color-border,rgba(0,0,0,.12));
+        border-radius:8px; box-shadow:0 4px 16px rgba(0,0,0,.15);
+        display:none;
+      }
+      .model-sel-panel::-webkit-scrollbar { width:4px; }
+      .model-sel-panel::-webkit-scrollbar-track { background:transparent; }
+      .model-sel-panel::-webkit-scrollbar-thumb { background:rgba(0,0,0,.08); border-radius:2px; }
+      .model-sel-panel.open { display:block; }
+      .model-sel-group {}
+            .model-sel-group-header {
+        display:flex; align-items:center; gap:4px; width:100%;
+        padding:6px 8px; background:var(--color-group-header,rgba(0,0,0,.04));
+        cursor:pointer; border:none; font-size:11px; font-weight:600;
+        color:var(--color-text,#333); text-align:left;
+      }
+      .model-sel-group-header:hover { background:var(--color-group-header-hover,rgba(0,0,0,.08)); }
+      .model-sel-group-arrow { display:inline-flex; width:14px; height:14px; transition:transform .2s; color:var(--muted); }
+      .model-sel-group-arrow.collapsed { transform:rotate(-90deg); }
+      .model-sel-group-arrow svg { width:14px; height:14px; stroke:currentColor; fill:none; stroke-width:1.5px; }
+      .model-sel-group-count { margin-left:auto; font-size:10px; color:var(--color-text-dim,#888); }
+      .model-sel-group-items { }
+      .model-sel-group-items.collapsed { display:none; }
+      .model-sel-opt {
+        display:block; width:100%; padding:5px 12px 5px 20px;
+        border:none; background:transparent; cursor:pointer; font-size:12px;
+        color:var(--color-text,#333); text-align:left;
+      }
+            .model-sel-opt:hover { background:var(--color-opt-hover,rgba(0,0,0,.06)); }
+      .model-sel-opt.selected { background:var(--color-opt-selected,rgba(0,100,240,.12)); font-weight:600; }
+      .model-sel-opt--default { display:flex; align-items:center; padding:5px 8px 5px 12px; border-bottom:1px solid var(--color-border,rgba(0,0,0,.08)); gap:4px; }
+      .model-sel-opt-btn { flex:1; padding:0; border:none; background:transparent; cursor:pointer; font-size:12px; color:var(--color-text,#333); text-align:left; }
+      .model-sel-opt-btn:hover { opacity:.8; }
+      .model-sel-opt-btn.selected { font-weight:600; }
+      .model-sel-opt-toggle { display:inline-flex; align-items:center; justify-content:center; padding:2px; border:none; background:transparent; cursor:pointer; color:var(--color-text-dim,#888); border-radius:4px; }
+      .model-sel-opt-toggle:hover { background:var(--color-opt-hover,rgba(0,0,0,.08)); }
+      .model-sel-toggle-arrow { display:inline-flex; width:16px; height:16px; transition:transform .2s; color:var(--muted); }
+      .model-sel-toggle-arrow.collapsed { transform:rotate(-90deg); }
+      .model-sel-toggle-arrow svg { width:16px; height:16px; stroke:currentColor; fill:none; stroke-width:1.5px; }
+    </style>
+    <div class="model-sel">
+      <button class="model-sel-trigger" type="button" ?disabled=${disabled}
+        @click=${() => togglePopover()}
+        @blur=${(e: FocusEvent) => { if (!(e.relatedTarget as HTMLElement)?.closest?.('.model-sel-panel')) closePopover(); }}>
+        <span class="model-sel-trigger-label">${selectedLabel}</span>
+        <span class="model-sel-trigger-arrow ${(state as any).___modelPopoverOpen ? 'open' : ''}">${icons.chevronDown}</span>
+      </button>
+      <div class="model-sel-panel ${(state as any).___modelPopoverOpen ? 'open' : ''}">
+        <div class="model-sel-opt model-sel-opt--default ${currentOverride === '' ? 'selected' : ''}">
+          <button class="model-sel-opt-btn" type="button"
+            ?disabled=${disabled}
+            @mousedown=${() => { closePopover(); switchChatModel(state, '').catch(()=>{}); }}>
+            ${defaultLabel}
+          </button>
+          <button class="model-sel-opt-toggle" type="button" @click=${toggleAllGroups}>
+            <span class="model-sel-toggle-arrow ${sortedNames.every(g => collapsed.has(g)) ? 'collapsed' : ''}">${icons.chevronDown}</span>
+          </button>
+        </div>
+        ${sortedNames.map(name => {
+          const items = groups.get(name)!;
+          const isCollapsed = collapsed.has(name);
+          return html`
+            <div class="model-sel-group">
+              <button class="model-sel-group-header" type="button" @click=${() => toggleGroup(name)}>
+                <span class="model-sel-group-arrow ${isCollapsed ? 'collapsed' : ''}">${icons.chevronDown}</span>
+                <span>${name}</span>
+                <span class="model-sel-group-count">${items.length}</span>
+              </button>
+              <div class="model-sel-group-items ${isCollapsed ? 'collapsed' : ''}">
+                ${items.map(entry => html`
+                  <button class="model-sel-opt ${entry.value === currentOverride ? 'selected' : ''}" type="button"
+                    ?disabled=${disabled}
+                    @mousedown=${() => { closePopover(); switchChatModel(state, entry.value).catch(()=>{}); }}>
+                    ${entry.label}
+                  </button>
+                `)}
+              </div>
+            </div>
+          `;
+        })}
+      </div>
+    </div>
+  `;
+}type ChatThinkingSelectOption = {
   value: string;
   label: string;
 };
@@ -1262,7 +1384,7 @@ export function resolveSessionOptionGroups(
     }
     for (const option of group.options) {
       if ((counts.get(option.label) ?? 0) > 1 && option.scopeLabel !== option.label) {
-        option.label = `${option.label} · ${option.scopeLabel}`;
+        option.label = `${option.label} 路 ${option.scopeLabel}`;
       }
     }
   }
@@ -1286,7 +1408,7 @@ export function resolveSessionOptionGroups(
     }
     return (
       label === trimmedScope ||
-      label.endsWith(` · ${trimmedScope}`) ||
+      label.endsWith(` 路 ${trimmedScope}`) ||
       label.endsWith(` / ${trimmedScope}`)
     );
   };
@@ -1314,7 +1436,7 @@ export function resolveSessionOptionGroups(
     if (labelIncludesScopeLabel(currentLabel, option.scopeLabel)) {
       continue;
     }
-    labels.set(option, `${currentLabel} · ${option.scopeLabel}`);
+    labels.set(option, `${currentLabel} 路 ${option.scopeLabel}`);
   }
 
   const finalCounts = countAssignedLabels();
@@ -1324,7 +1446,7 @@ export function resolveSessionOptionGroups(
       continue;
     }
     // Fall back to the full key only when every friendlier disambiguator still collides.
-    labels.set(option, `${currentLabel} · ${option.key}`);
+    labels.set(option, `${currentLabel} 路 ${option.key}`);
   }
 
   for (const { option } of allOptions) {
@@ -1362,3 +1484,9 @@ function resolveSessionScopedOptionLabel(
 
   return base;
 }
+
+
+
+
+
+
